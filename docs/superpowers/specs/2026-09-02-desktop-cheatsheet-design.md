@@ -1,7 +1,7 @@
 # macOS 桌面速查工具产品设计
 
 日期：2026-09-02  
-状态：已确认
+状态：待技术方案复核
 
 ## 1. 产品目标
 
@@ -34,7 +34,7 @@
 
 ### 包含
 
-- macOS 原生菜单栏应用。
+- macOS 菜单栏桌面应用。
 - 登录后自动启动，设置中可关闭。
 - 屏幕右侧鼠标停留唤出。
 - 可修改的全局快捷键唤出。
@@ -199,39 +199,44 @@
 
 ### 8.1 技术选型
 
-- Swift 作为开发语言。
-- SwiftUI 构建标签、条目编辑、新建标签和导入预览界面。
-- AppKit 管理菜单栏入口、`NSPanel` 悬浮窗口、窗口层级和系统事件。
-- 使用系统 API 注册全局快捷键，不监听或记录其他键盘输入。
-- 使用 `NSEvent` 全局鼠标移动监控判断鼠标是否进入右侧触发区。
-- 使用系统登录项 API 管理开机启动。
-- 不引入第三方依赖。
+- TypeScript 作为统一开发语言，所有业务代码保持可由熟悉 React/Next.js 的开发者直接阅读。
+- React 构建标签、条目编辑、新建标签和导入预览界面。
+- Vite 负责开发服务器和前端资源构建；不使用 Next.js，因为本工具不需要服务端渲染、路由或后端服务。
+- Electron 主进程管理菜单栏、悬浮窗口、全局快捷键、屏幕定位、开机启动和本地文件。
+- Electron `BrowserWindow` 使用 macOS `panel` 窗口类型，并设置始终置顶、所有桌面空间可见及全屏 App 上方可见。
+- Electron `globalShortcut` 注册全局快捷键，不监听或记录其他键盘输入。
+- 主进程每 100ms 读取一次系统鼠标位置，用简单状态机判断是否在右侧触发区持续停留 0.5 秒；面板显示后暂停无意义的重复触发。
+- 使用 Electron 登录项 API 管理开机启动；应用必须先完成打包和本机签名，再验证该功能。
+- Node.js `fs` 负责 Application Support 目录中的 JSON 原子写入和备份。
+- 渲染进程启用 `contextIsolation`，关闭 `nodeIntegration`；只通过受限的 preload API 与主进程通信。
+- 除 React、Electron、Vite、测试及打包所需工具外，不引入状态管理框架、数据库、CSS 框架或其他运行时依赖。
 
 ### 8.2 组件职责
 
-#### AppLifecycle
+#### Electron Main Process
 
 - 启动菜单栏应用。
 - 管理开机启动设置。
 - 初始化其他组件。
+- 注册 renderer 允许调用的 IPC 接口。
 
-#### PanelController
+#### PanelWindowController
 
-- 创建和持有 `NSPanel`。
+- 创建和持有 `BrowserWindow`。
 - 控制面板的显示位置、展开、收起和跨桌面空间行为。
 - 保证面板可以显示在其他 App 的全屏空间中。
 
 #### TriggerController
 
 - 注册和更新全局快捷键。
-- 观察鼠标位置与 0.5 秒停留计时。
-- 将唤出或收起请求发送给 `PanelController`。
+- 定时读取鼠标位置并维护 0.5 秒停留状态。
+- 将唤出或收起请求发送给 `PanelWindowController`。
 
-#### LabelStore
+#### LabelRepository
 
-- 持有标签和条目状态。
-- 执行新增、修改、删除、排序与上次标签记录。
-- 校验数据边界并自动保存。
+- 在 Electron 主进程中持有唯一可信数据。
+- 接收新增、修改、删除、排序与上次标签记录请求。
+- 校验来自渲染进程的数据边界并自动保存。
 - 维护上一份有效备份。
 
 #### ImportParser
@@ -241,20 +246,28 @@
 - 标记无效条目和重复条目。
 - 只返回预览结果，不直接修改 `LabelStore`。
 
-#### SwiftUI Views
+#### Preload Bridge
 
-- `LabelListView`：查看状态。
-- `LabelEditView`：编辑状态。
-- `NewLabelView`：手动创建和复制 AI 提示词。
-- `ImportPreviewView`：展示解析、重复与选择结果。
-- `SettingsView`：快捷键、边缘停留时间和开机启动设置。
+- 使用 `contextBridge` 暴露最小、具名且类型明确的 API。
+- 不向 React 页面暴露 Node.js、文件路径写入或任意 IPC 能力。
+- 把主进程的最新文档、设置和错误状态发送给 React 页面。
+
+#### React Views
+
+- `LabelList`：查看状态。
+- `LabelEditor`：编辑状态。
+- `NewLabel`：手动创建和复制 AI 提示词。
+- `ImportPreview`：展示解析、重复与选择结果。
+- `Settings`：快捷键、边缘停留时间和开机启动设置。
+- 页面只使用 React 自带状态和 Context；第一版不增加 Redux、Zustand 等状态库。
 
 ## 9. 数据流
 
 ### 查看与编辑
 
 ```text
-用户操作 → SwiftUI View → LabelStore → 内存状态更新 → 原子写入本地文件 → 界面自动刷新
+用户操作 → React View → Preload API → Electron IPC → LabelRepository
+→ 内存状态更新 → 原子写入本地文件 → 新状态返回 React 页面
 ```
 
 ### AI 导入
@@ -267,7 +280,7 @@
 ### 面板唤出
 
 ```text
-鼠标停留或全局快捷键 → TriggerController → PanelController
+鼠标停留或全局快捷键 → TriggerController → PanelWindowController
 → 定位当前屏幕右侧 → 显示上次标签
 ```
 
@@ -293,6 +306,8 @@
 - AI 导入的有效格式、无效 JSON、缺失字段、空字段和混合有效条目。
 - 以 `content` 判断重复，且只去除首尾空白。
 - 主文件损坏后的备份恢复。
+- 鼠标停留状态机与面板尺寸计算。
+- 使用 Vitest 测试纯 TypeScript 逻辑，React Testing Library 测试关键界面状态。
 
 ### 集成测试
 
@@ -302,6 +317,7 @@
 - 修改全局快捷键后，新旧快捷键状态正确。
 - 开机启动设置能够打开和关闭。
 - AI 导入预览不会在确认前修改本地数据。
+- preload 只暴露允许的 API，渲染进程无法直接访问 Node.js 或任意文件路径。
 
 ### 手工验收
 
@@ -315,4 +331,4 @@
 
 ## 12. 设计结论
 
-第一版是一款只服务当前用户的本地原生 macOS 工具。它以屏幕边缘抽屉提供最短的速查路径，以极简查看状态降低视觉干扰，以独立编辑状态管理内容，并通过复制标准提示词与粘贴 JSON 的方式复用外部 AI，而不引入账号、网络服务或内置模型。
+第一版是一款只服务当前用户的本地 macOS 桌面工具。它使用 React + TypeScript 保持界面与业务代码易读，使用 Electron 提供菜单栏、全局快捷键、跨桌面空间浮窗和登录启动等系统能力。它以屏幕边缘抽屉提供最短的速查路径，以极简查看状态降低视觉干扰，以独立编辑状态管理内容，并通过复制标准提示词与粘贴 JSON 的方式复用外部 AI，而不引入账号、网络服务或内置模型。
